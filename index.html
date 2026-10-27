@@ -2211,9 +2211,10 @@
         }
 
         // --- 6. SCHOOL GRADES: monthly component marks, midyear, annual work, final exam and result ---
+        // درجات اليومي المدخلة يدويًا مجموعها 90، ودرجة الحضور (10) تُحسب تلقائيًا من جلسات الحضور.
         const MONTHLY_GRADE_COMPONENTS = [
-            { key: 'Daily1', label: 'اليومي الأول', max: 25 },
-            { key: 'Daily2', label: 'اليومي الثاني', max: 25 },
+            { key: 'Daily1', label: 'اليومي الأول', max: 20 },
+            { key: 'Daily2', label: 'اليومي الثاني', max: 20 },
             { key: 'Preparation', label: 'التحضير', max: 20 },
             { key: 'Notebook', label: 'الدفتر', max: 15 },
             { key: 'BehaviorMark', label: 'السلوك', max: 15 }
@@ -2257,7 +2258,7 @@
             const details = getAttendanceGradeDetails(student, gradeTerm, gradeMonth, subjectName);
             if (details.sessionCount > 0) return details.score === null ? '' : details.score;
             const fallback = gradeNumber(fallbackValue);
-            return fallback === null ? '' : Math.min(10, Math.max(0, Math.ceil(fallback)));
+            return fallback === null ? '' : Math.min(10, Math.max(0, Math.round(fallback)));
         }
 
         function syncAttendanceGradeForContext(context) {
@@ -2297,12 +2298,12 @@
                 const writtenEntered = written !== '' && written !== null && written !== undefined && Number.isFinite(Number(written));
                 const oralEntered = oral !== '' && oral !== null && oral !== undefined && Number.isFinite(Number(oral));
                 if (writtenEntered && oralEntered) {
-                    record.midyearDirect = Math.min(100, Math.max(0, Math.ceil(Number(written) + Number(oral))));
+                    record.midyearDirect = Math.min(100, Math.max(0, Math.round(Number(written) + Number(oral))));
                 } else {
                     record.midyearDirect = '';
                 }
             } else {
-                record.midyearDirect = Math.min(100, Math.max(0, Math.ceil(Number(direct))));
+                record.midyearDirect = Math.min(100, Math.max(0, Math.round(Number(direct))));
             }
             record.midyearMode = 'direct';
             delete record.midyearWritten;
@@ -2341,6 +2342,7 @@
             ['term1', 'term2'].forEach(prefix => {
                 [1, 2, 3].forEach(month => {
                     MONTHLY_GRADE_COMPONENTS.forEach(component => { record[`${prefix}Month${month}${component.key}`] = ''; });
+                    record[`${prefix}Month${month}Attendance`] = '';
                     record[`${prefix}Month${month}Paper`] = '';
                 });
             });
@@ -2384,22 +2386,35 @@
         }
 
         function getMonthlyBreakdown(record, prefix, month, student = null, subjectName = null) {
-            const values = MONTHLY_GRADE_COMPONENTS.map(component => gradeNumber(record[`${prefix}Month${month}${component.key}`]));
-            const dailyComplete = values.every(value => value !== null);
-            const dailyTotal = dailyComplete ? values.reduce((sum, value) => sum + value, 0) : null;
-            const paperTotal = gradeNumber(record[`${prefix}Month${month}Paper`]);
+            const values = MONTHLY_GRADE_COMPONENTS.map(component => {
+                const value = gradeNumber(record[`${prefix}Month${month}${component.key}`]);
+                return value === null ? null : Math.min(component.max, Math.max(0, Math.round(value)));
+            });
+            const attendanceRaw = student
+                ? getLinkedAttendanceGrade(student, prefix, month, subjectName, record[`${prefix}Month${month}Attendance`])
+                : record[`${prefix}Month${month}Attendance`];
+            const attendanceScore = gradeNumber(attendanceRaw);
+            const manualComponentsComplete = values.every(value => value !== null);
+            // اليومي = 20 + 20 + الحضور 10 + التحضير 20 + الدفتر 15 + السلوك 15 = 100.
+            const dailyComplete = manualComponentsComplete && attendanceScore !== null;
+            const dailyTotal = dailyComplete
+                ? values.reduce((sum, value) => sum + value, 0) + Math.min(10, Math.max(0, Math.round(attendanceScore)))
+                : null;
+            const rawPaperTotal = gradeNumber(record[`${prefix}Month${month}Paper`]);
+            const paperTotal = rawPaperTotal === null ? null : Math.min(100, Math.max(0, Math.round(rawPaperTotal)));
             const paperComplete = paperTotal !== null;
             const componentsComplete = dailyComplete;
             const complete = dailyComplete && paperComplete;
-            const hasAny = values.some(value => value !== null) || paperComplete;
+            const hasAny = values.some(value => value !== null) || attendanceScore !== null || paperComplete;
+            const hasDetailedEntry = values.some(value => value !== null) || paperComplete;
             const storedTotal = gradeNumber(record[`${prefix}Month${month}`]);
-            // درجة امتحان الشهر = (مجموع اليومي من 100 + درجة الورقة من 100) ÷ 2.
-            // إذا كانت البيانات قديمة ولا تحتوي على تفاصيل التوزيع الجديد، يبقى المجموع القديم ظاهراً فقط.
+            // امتحان الشهر = (مجموع اليومي من 100 + الورقة من 100) ÷ 2، مع التقريب لأقرب عدد صحيح.
+            // إذا كانت البيانات قديمة ولا تحتوي على تفاصيل التوزيع الجديد، يبقى المجموع القديم ظاهرًا فقط.
             const total = complete
-                ? Math.ceil((dailyTotal + paperTotal) / 2)
-                : (!hasAny ? (storedTotal === null ? null : Math.ceil(storedTotal)) : null);
+                ? Math.round((dailyTotal + paperTotal) / 2)
+                : (!hasDetailedEntry && storedTotal !== null ? Math.round(storedTotal) : null);
             return {
-                values, hasAny, complete, componentsComplete, dailyComplete,
+                values, attendanceScore, hasAny, complete, componentsComplete, dailyComplete,
                 paperComplete, dailyTotal, paperTotal, componentTotal: dailyTotal,
                 dailyEvaluation: null, total, storedTotal
             };
@@ -2413,10 +2428,10 @@
             const values = [month1.total, month2.total];
             if (isGradeMonth3Enabled(prefix, subjectName)) {
                 const month3 = getMonthlyBreakdown(record, prefix, 3, student, subjectName);
-                // The optional third month is counted only once its six components are complete.
+                // The optional third month is counted only when its required daily marks, attendance and paper mark are complete.
                 if (month3.complete) values.push(month3.total);
             }
-            return Math.ceil(values.reduce((sum, value) => sum + value, 0) / values.length);
+            return Math.round(values.reduce((sum, value) => sum + value, 0) / values.length);
         }
 
         function getTerm1Mark(student) {
@@ -2431,7 +2446,8 @@
 
         function getMidyearMark(student) {
             const record = getStudentGradeRecord(student, getGradeSubjectContext(student), false);
-            return gradeNumber(record.midyearDirect);
+            const value = gradeNumber(record.midyearDirect);
+            return value === null ? null : Math.min(100, Math.max(0, Math.round(value)));
         }
 
         function getAnnualWorkMark(student) {
@@ -2439,23 +2455,24 @@
             const midyear = getMidyearMark(student);
             const term2 = getTerm2Mark(student);
             if (term1 === null || midyear === null || term2 === null) return null;
-            return Math.ceil((term1 + midyear + term2) / 3);
+            return Math.round((term1 + midyear + term2) / 3);
         }
 
         function getFinalResultMark(student) {
             const record = getStudentGradeRecord(student, getGradeSubjectContext(student), false);
             const annual = getAnnualWorkMark(student);
-            const finalExam = gradeNumber(record.finalExam);
+            const rawFinalExam = gradeNumber(record.finalExam);
+            const finalExam = rawFinalExam === null ? null : Math.min(100, Math.max(0, Math.round(rawFinalExam)));
             if (annual === null || finalExam === null) return null;
-            return Math.ceil((annual + finalExam) / 2);
+            return Math.round((annual + finalExam) / 2);
         }
 
         function gradeDisplay(value) {
             if (value === null || value === undefined || value === '') return '—';
             const n = Number(value);
             if (!Number.isFinite(n)) return '—';
-            // كل الدرجات المعروضة أعداد صحيحة؛ أي كسر يُقرب إلى العدد الأعلى.
-            return String(Math.ceil(n));
+            // كل الدرجات المعروضة أعداد صحيحة؛ يُقرّب الكسر إلى أقرب عدد صحيح (النصف فأكثر للأعلى).
+            return String(Math.round(n));
         }
 
         function sanitizeGradeInteger(input, maxValue = 100) {
@@ -2471,20 +2488,20 @@
                 parsed = Number.parseFloat(cleaned);
             }
             if (!Number.isFinite(parsed)) { input.value = ''; return; }
-            input.value = String(Math.min(maxValue, Math.max(0, Math.ceil(parsed))));
+            input.value = String(Math.min(maxValue, Math.max(0, Math.round(parsed))));
         }
 
         function readGradeIntegerInput(input, maxValue = 100) {
             if (!input || input.value === '') return '';
             const parsed = Number(input.value);
             if (!Number.isFinite(parsed)) return '';
-            return Math.min(maxValue, Math.max(0, Math.ceil(parsed)));
+            return Math.min(maxValue, Math.max(0, Math.round(parsed)));
         }
 
         function gradeInputValue(value, maxValue = 100) {
             const parsed = gradeNumber(value);
             if (parsed === null) return '';
-            return Math.min(maxValue, Math.max(0, Math.ceil(parsed)));
+            return Math.min(maxValue, Math.max(0, Math.round(parsed)));
         }
 
         function getGradeSubjectOptions() {
@@ -2602,10 +2619,14 @@
                 const record = getStudentGradeRecord(student, getGradeSubjectContext(student), false);
                 const subjectContext = getGradeSubjectContext(student);
                 const breakdown = getMonthlyBreakdown(record, prefix, month, student, subjectContext);
-                const inputs = MONTHLY_GRADE_COMPONENTS.map(component => {
+                let inputs = '';
+                MONTHLY_GRADE_COMPONENTS.forEach(component => {
                     const value = gradeInputValue(record[`${prefix}Month${month}${component.key}`], component.max);
-                    return `<td class="grade-data-cell text-center align-middle"><input type="number" min="0" max="${component.max}" step="1" inputmode="numeric" oninput="sanitizeGradeInteger(this, ${component.max})" id="grade-${prefix}-m${month}-${component.key}-${student.id}" value="${value}" aria-label="${component.label} للطالب ${escapeHtml(student.name)} من ${component.max}" class="grade-cell-input font-bold text-[11px] text-slate-800" title="${component.label} (من ${component.max})"></td>`;
-                }).join('');
+                    inputs += `<td class="grade-data-cell text-center align-middle"><input type="number" min="0" max="${component.max}" step="1" inputmode="numeric" oninput="sanitizeGradeInteger(this, ${component.max})" id="grade-${prefix}-m${month}-${component.key}-${student.id}" value="${value}" aria-label="${component.label} للطالب ${escapeHtml(student.name)} من ${component.max}" class="grade-cell-input font-bold text-[11px] text-slate-800" title="${component.label} (من ${component.max})"></td>`;
+                    if (component.key === 'Daily2') {
+                        inputs += `<td class="p-2 text-center font-black text-emerald-700 whitespace-nowrap" title="درجة الحضور محسوبة تلقائيًا من سجل الحضور">${breakdown.attendanceScore === null ? '—' : `${gradeDisplay(breakdown.attendanceScore)} / 10`}</td>`;
+                    }
+                });
                 const paperValue = gradeInputValue(record[`${prefix}Month${month}Paper`], 100);
                 const paperInput = `<td class="grade-data-cell text-center align-middle"><input type="number" min="0" max="100" step="1" inputmode="numeric" oninput="sanitizeGradeInteger(this, 100)" id="grade-${prefix}-m${month}-Paper-${student.id}" value="${paperValue}" aria-label="درجة الورقة للطالب ${escapeHtml(student.name)} من 100" class="grade-cell-input font-bold text-[11px] text-indigo-900" title="درجة الورقة من 100"></td>`;
                 return `<tr class="border-b border-slate-100 text-[11px] align-middle">
@@ -2640,8 +2661,8 @@
                 const label = activeGradesSubTab === 0 ? 'الفصل الأول' : 'الفصل الثاني';
                 const monthLabel = ['الأول', 'الثاني', 'الثالث'][activeGradeMonth - 1];
                 const rows = renderMonthlyGradeRows(filtered, prefix, activeGradeMonth);
-                const componentHeaders = MONTHLY_GRADE_COMPONENTS.map(component => `${component.label} / ${component.max}`);
-                const monthFormula = 'اليومي = اليومي الأول /25 + اليومي الثاني /25 + التحضير /20 + الدفتر /15 + السلوك /15 = 100. امتحان الشهر = (مجموع اليومي + درجة الورقة /100) ÷ 2.';
+                const componentHeaders = ['اليومي الأول / 20', 'اليومي الثاني / 20', 'الحضور / 10', 'التحضير / 20', 'الدفتر / 15', 'السلوك / 15'];
+                const monthFormula = 'اليومي = اليومي الأول /20 + اليومي الثاني /20 + الحضور /10 + التحضير /20 + الدفتر /15 + السلوك /15 = 100. درجة الحضور تُحسب تلقائيًا من جلسات الحضور. امتحان الشهر = (مجموع اليومي + الورقة /100) ÷ 2.';
                 const table = gradeTableCard(`${label} - الشهر ${monthLabel}`, monthFormula, [...nameCols, ...componentHeaders, 'الورقة / 100', 'مجموع اليومي / 100', 'درجة الورقة / 100', 'امتحان الشهر / 100'], rows, prefix === 'term1' ? 'saveTerm1Grades' : 'saveTerm2Grades');
                 container.innerHTML = renderGradeMonthTabs(prefix) + table;
                 return;
@@ -2689,12 +2710,16 @@
             const month = activeGradeMonth;
             getGradeFilteredStudents().forEach(student => {
                 const record = getStudentGradeRecord(student);
+                const subjectContext = getGradeSubjectContext(student);
                 const entered = MONTHLY_GRADE_COMPONENTS.map(component => {
                     const input = document.getElementById(`grade-${prefix}-m${month}-${component.key}-${student.id}`);
                     return { component, value: readGradeIntegerInput(input, component.max) };
                 });
                 const paperInput = document.getElementById(`grade-${prefix}-m${month}-Paper-${student.id}`);
                 const paper = readGradeIntegerInput(paperInput, 100);
+                const attendanceScore = gradeNumber(getLinkedAttendanceGrade(
+                    student, prefix, month, subjectContext, record[`${prefix}Month${month}Attendance`]
+                ));
                 const hasInput = entered.some(item => item.value !== '') || paper !== '';
                 const hadSavedComponents = MONTHLY_GRADE_COMPONENTS.some(component => gradeNumber(record[`${prefix}Month${month}${component.key}`]) !== null)
                     || gradeNumber(record[`${prefix}Month${month}Paper`]) !== null;
@@ -2704,11 +2729,11 @@
                 record[`${prefix}Month${month}Paper`] = paper === '' ? '' : paper;
                 if (hasInput) {
                     const allDailyEntered = entered.every(item => item.value !== '');
-                    record[`${prefix}Month${month}`] = allDailyEntered && paper !== ''
-                        ? Math.ceil((entered.reduce((sum, item) => sum + item.value, 0) + paper) / 2)
+                    record[`${prefix}Month${month}`] = allDailyEntered && attendanceScore !== null && paper !== ''
+                        ? Math.round((entered.reduce((sum, item) => sum + item.value, 0) + attendanceScore + paper) / 2)
                         : '';
                 } else if (hadSavedComponents) {
-                    // تم مسح درجات اليومي والورقة المحفوظة سابقاً.
+                    // تم مسح درجات اليومي والورقة المحفوظة سابقًا؛ تبقى درجة الحضور مرتبطة بجلساتها ولا تُدخل يدويًا.
                     record[`${prefix}Month${month}`] = '';
                 }
             });
